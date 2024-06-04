@@ -250,8 +250,10 @@ public:
             };
             /*std::cout << "popped_item size:" << sizeof(popped_item)
                       << ", header size:" << header->size - sizeof(*header) << std::endl;*/
-            std::memcpy(&popped_item, reinterpret_cast<const void *>(header + 1),
-                        header->size - sizeof(*header));
+            
+            popped_item = std::move(*const_cast<T *>(reinterpret_cast<const T *>(header + 1)));
+            /*std::memcpy(&popped_item, reinterpret_cast<const void *>(header + 1),
+                        header->size - sizeof(*header));*/
             spsc_q_.pop();
             break;
         }
@@ -299,8 +301,7 @@ public:
                 std::this_thread::sleep_for(std::chrono::microseconds(1));
                 continue;
             };
-            std::memcpy(&popped_item, reinterpret_cast<const void *>(header + 1),
-                        header->size - sizeof(*header));
+            popped_item = std::move(*const_cast<T *>(reinterpret_cast<const T *>(header + 1)));
             spsc_q_.pop();
             break;
         }
