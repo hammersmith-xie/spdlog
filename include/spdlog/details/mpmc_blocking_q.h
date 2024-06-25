@@ -53,10 +53,12 @@ SOFTWARE.
 
 // alloc and push are not atomic, so SPSCVarQueueOPT should not be used in shared-memory IPC(use
 // SPSCVarQueue instead)
-template <uint32_t Bytes>
-class SPSCVarQueueOPT {
+template<uint32_t Bytes>
+class SPSCVarQueueOPT
+{
 public:
-    struct MsgHeader {
+    struct MsgHeader
+    {
         // size of this msg, including header itself
         // auto set by lib, can be read by user
         uint16_t size;
@@ -68,31 +70,39 @@ public:
     };
     static constexpr uint32_t BLK_CNT = Bytes / sizeof(MsgHeader);
 
-    MsgHeader *alloc(uint16_t size_) {
+    MsgHeader *alloc(uint16_t size_)
+    {
         size = size_ + sizeof(MsgHeader);
         uint32_t blk_sz = (size + sizeof(MsgHeader) - 1) / sizeof(MsgHeader);
-        if (blk_sz >= free_write_cnt) {
+        if (blk_sz >= free_write_cnt)
+        {
             uint32_t read_idx_cache = *(volatile uint32_t *)&read_idx;
-            if (read_idx_cache <= write_idx) {
+            if (read_idx_cache <= write_idx)
+            {
                 free_write_cnt = BLK_CNT - write_idx;
-                if (blk_sz >= free_write_cnt && read_idx_cache != 0) {  // wrap around
+                if (blk_sz >= free_write_cnt && read_idx_cache != 0)
+                { // wrap around
                     blk[0].size = 0;
                     std::atomic_thread_fence(std::memory_order_release);
                     blk[write_idx].size = 1;
                     write_idx = 0;
                     free_write_cnt = read_idx_cache;
                 }
-            } else {
+            }
+            else
+            {
                 free_write_cnt = read_idx_cache - write_idx;
             }
-            if (free_write_cnt <= blk_sz) {
+            if (free_write_cnt <= blk_sz)
+            {
                 return nullptr;
             }
         }
         return &blk[write_idx];
     }
 
-    void push() {
+    void push()
+    {
         uint32_t blk_sz = (size + sizeof(MsgHeader) - 1) / sizeof(MsgHeader);
         blk[write_idx + blk_sz].size = 0;
         std::atomic_thread_fence(std::memory_order_release);
@@ -102,39 +112,49 @@ public:
         free_write_cnt -= blk_sz;
     }
 
-    template <typename Writer>
-    bool tryPush(uint16_t sz, Writer writer) {
+    template<typename Writer>
+    bool tryPush(uint16_t sz, Writer writer)
+    {
         MsgHeader *header = alloc(sz);
-        if (!header) return false;
+        if (!header)
+            return false;
         writer(header);
         push();
         return true;
     }
 
-    template <typename Writer>
-    void blockPush(uint16_t sz, Writer writer) {
-        while (!tryPush(sz, writer));
+    template<typename Writer>
+    void blockPush(uint16_t sz, Writer writer)
+    {
+        while (!tryPush(sz, writer))
+            ;
     }
 
-    MsgHeader *front() {
+    MsgHeader *front()
+    {
         uint16_t sz = blk[read_idx].size;
-        if (sz == 1) {  // wrap around
+        if (sz == 1)
+        { // wrap around
             read_idx = 0;
             sz = blk[0].size;
         }
-        if (sz == 0) return nullptr;
+        if (sz == 0)
+            return nullptr;
         return &blk[read_idx];
     }
 
-    void pop() {
+    void pop()
+    {
         uint32_t blk_sz = (blk[read_idx].size + sizeof(MsgHeader) - 1) / sizeof(MsgHeader);
         *(volatile uint32_t *)&read_idx = read_idx + blk_sz;
     }
 
-    template <typename Reader>
-    bool tryPop(Reader reader) {
+    template<typename Reader>
+    bool tryPop(Reader reader)
+    {
         MsgHeader *header = front();
-        if (!header) return false;
+        if (!header)
+            return false;
         reader(header);
         pop();
         return true;
@@ -150,113 +170,43 @@ private:
     alignas(128) uint32_t read_idx = 0;
 };
 
-template <typename T>
-class mpmc_blocking_queue {
+template<typename T>
+class mpmc_blocking_queue
+{
 public:
     using item_type = T;
     explicit mpmc_blocking_queue(size_t max_items)
-        : q_(max_items) {}
+        : q_(max_items)
+    {}
 
 #ifndef __MINGW32__
     // try to enqueue and block if no room left
-    void enqueue(T &&item) {
-        /*
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            pop_cv_.wait(lock, [this] { return !this->q_.full(); });
-            q_.push_back(std::move(item));
-        }
-        push_cv_.notify_one();
-        */
-        spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
-            std::memcpy(header + 1, &item, sizeof(item));
-        });
+    void enqueue(T &&item)
+    {
+        spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) { new (header + 1) T(std::forward<T>(item)); });
     }
 
     // enqueue immediately. overrun oldest message in the queue if no room left.
-    void enqueue_nowait(T &&item) {
-        spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
-            std::memcpy(header + 1, &item, sizeof(item));
-        });
-        /*
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            q_.push_back(std::move(item));
-        }
-        push_cv_.notify_one();
-        */
+    void enqueue_nowait(T &&item)
+    {
+        spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) { new (header + 1) T(std::forward<T>(item)); });
     }
 
-    void enqueue_if_have_room(T &&item) {
-        /*
-        bool pushed = false;
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            if (!q_.full()) {
-                q_.push_back(std::move(item));
-                pushed = true;
-            }
-        }
-
-        if (pushed) {
-            push_cv_.notify_one();
-        } else {
-            ++discard_counter_;
-        }
-        */
-        spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
-            std::memcpy(header + 1, &item, sizeof(item));
-        });
+    void enqueue_if_have_room(T &&item)
+    {
+        spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) { new (header + 1) T(std::forward<T>(item)); });
     }
 
     // dequeue with a timeout.
     // Return true, if succeeded dequeue item, false otherwise
-    bool dequeue_for(T &popped_item, std::chrono::milliseconds wait_duration) {
-        /*
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            if (!push_cv_.wait_for(lock, wait_duration, [this] { return !this->q_.empty(); })) {
-                return false;
-            }
-            popped_item = std::move(q_.front());
-            q_.pop_front();
-        }
-        pop_cv_.notify_one();
-        return true;
-        */
-        SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header = spsc_q_.front();
-        if (!header) return false;
-        std::memcpy(&popped_item, reinterpret_cast<const void *>(header + 1),
-                    header->size - sizeof(*header));
-        spsc_q_.pop();
-    }
-
-    // blocking dequeue without a timeout.
-    void dequeue(T &popped_item) {
-        /*
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            push_cv_.wait(lock, [this] { return !this->q_.empty(); });
-            popped_item = std::move(q_.front());
-            q_.pop_front();
-        }
-        pop_cv_.notify_one();
-        */
-        while (true) {
-            SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header = spsc_q_.front();
-            if (!header) {
-                std::this_thread::sleep_for(std::chrono::microseconds(1));
-                continue;
-            };
-            /*std::cout << "popped_item size:" << sizeof(popped_item)
-                      << ", header size:" << header->size - sizeof(*header) << std::endl;*/
-            
+    bool dequeue_for(T &popped_item, std::chrono::milliseconds wait_duration)
+    {
+        bool has_update = spsc_q_.tryPop([&popped_item](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
             popped_item = std::move(*const_cast<T *>(reinterpret_cast<const T *>(header + 1)));
-            /*std::memcpy(&popped_item, reinterpret_cast<const void *>(header + 1),
-                        header->size - sizeof(*header));*/
-            spsc_q_.pop();
-            break;
-        }
+        });
+        if (!has_update)
+            return false;
+        return true;
     }
 
 #else
@@ -264,72 +214,73 @@ public:
     // so release the mutex at the very end each function.
 
     // try to enqueue and block if no room left
-    void enqueue(T &&item) {
+    void enqueue(T &&item)
+    {
         spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
-            std::memcpy(header + 1, &item, sizeof(item));
+            // std::memcpy(header + 1, reinterpret_cast<const uint8_t *>(&item), sizeof(T));
+            new (header + 1) T(std::forward<T>(item));
         });
     }
 
     // enqueue immediately. overrun oldest message in the queue if no room left.
-    void enqueue_nowait(T &&item) {
+    void enqueue_nowait(T &&item)
+    {
         spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
-            std::memcpy(header + 1, &item, sizeof(item));
+            // std::memcpy(header + 1, reinterpret_cast<const uint8_t *>(&item), sizeof(T));
+            new (header + 1) T(std::forward<T>(item));
         });
     }
 
-    void enqueue_if_have_room(T &&item) {
+    void enqueue_if_have_room(T &&item)
+    {
         spsc_q_.blockPush(sizeof(item), [&](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
-            std::memcpy(header + 1, &item, sizeof(item));
+            // std::memcpy(header + 1, reinterpret_cast<const uint8_t *>(&item), sizeof(T));
+            new (header + 1) T(std::forward<T>(item));
         });
     }
 
     // dequeue with a timeout.
     // Return true, if succeeded dequeue item, false otherwise
-    bool dequeue_for(T &popped_item, std::chrono::milliseconds wait_duration) {
-        SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header = spsc_q_.front();
-        if (!header) return false;
-        std::memcpy(&popped_item, reinterpret_cast<const void *>(header + 1),
-                    header->size - sizeof(*header));
-        spsc_q_.pop();
+    bool dequeue_for(T &popped_item, std::chrono::milliseconds wait_duration)
+    {
+        bool has_update = spsc_q_.tryPop([&popped_item](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
+            popped_item = std::move(*const_cast<T *>(reinterpret_cast<const T *>(header + 1)));
+        });
+        if (!has_update)
+            return false;
+        return true;
     }
 
     // blocking dequeue without a timeout.
-    void dequeue(T &popped_item) {
-        while (true) {
-            SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header = spsc_q_.front();
-            if (!header) {
-                std::this_thread::sleep_for(std::chrono::microseconds(1));
+    void dequeue(T &popped_item)
+    {
+        while (true)
+        {
+            bool has_update = spsc_q_.tryPop([&popped_item](SPSCVarQueueOPT<QUEUE_SIZE>::MsgHeader *header) {
+                popped_item = std::move(*const_cast<T *>(reinterpret_cast<const T *>(header + 1)));
+            });
+            if (!has_update)
                 continue;
-            };
-            popped_item = std::move(*const_cast<T *>(reinterpret_cast<const T *>(header + 1)));
-            spsc_q_.pop();
             break;
         }
     }
 
 #endif
 
-    size_t overrun_counter() {
+    size_t overrun_counter()
+    {
         // std::unique_lock<std::mutex> lock(queue_mutex_);
         return q_.overrun_counter();
     }
 
-    size_t discard_counter() { return discard_counter_.load(std::memory_order_relaxed); }
-
-    size_t size() {
+    size_t size()
+    {
         // std::unique_lock<std::mutex> lock(queue_mutex_);
         return q_.size();
     }
 
-    void reset_overrun_counter() {
-        // std::unique_lock<std::mutex> lock(queue_mutex_);
-        q_.reset_overrun_counter();
-    }
-
-    void reset_discard_counter() { discard_counter_.store(0, std::memory_order_relaxed); }
-
 private:
-    static constexpr int QUEUE_SIZE = 16 * 1024 * 1024;  // 16MB
+    static constexpr int QUEUE_SIZE = 16 * 1024 * 1024; // 16MB
     SPSCVarQueueOPT<QUEUE_SIZE> spsc_q_ = SPSCVarQueueOPT<QUEUE_SIZE>();
     std::mutex queue_mutex_;
     std::condition_variable push_cv_;
@@ -337,5 +288,5 @@ private:
     spdlog::details::circular_q<T> q_;
     std::atomic<size_t> discard_counter_{0};
 };
-}  // namespace details
-}  // namespace spdlog
+} // namespace details
+} // namespace spdlog
